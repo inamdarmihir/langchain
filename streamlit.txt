@@ -1,0 +1,7 @@
+[huggingface]
+api_token = "YOUR_TOKEN_HERE"
+
+[app_settings]
+debug = false
+max_chunk_size = 1000
+default_num_eval_questions = 5
