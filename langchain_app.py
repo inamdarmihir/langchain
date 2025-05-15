@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 from typing import List, Dict, Any, Optional
 
+# Import secrets handler
+from secrets_handler import setup_api_access
+
 # LangChain imports
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, CSVLoader
@@ -53,12 +56,19 @@ if "history" not in st.session_state:
 def initialize_llm():
     """Initialize the open-source LLM (Mistral)."""
     try:
+        # Ensure HF token is available
+        token = os.environ.get('HUGGINGFACE_API_TOKEN') or os.environ.get('HF_API_TOKEN')
+        if not token:
+            st.error("Hugging Face API token not found. Please set up your token first.")
+            st.stop()
+            
         # Use HF Endpoint for Mistral
         llm = HuggingFaceEndpoint(
             repo_id="mistralai/Mistral-7B-Instruct-v0.2",
             max_length=2048,
             temperature=0.1,
-            model_kwargs={"max_new_tokens": 512}
+            model_kwargs={"max_new_tokens": 512},
+            huggingfacehub_api_token=token
         )
         return llm
     except Exception as e:
@@ -240,7 +250,8 @@ def run_rag_evaluation(questions, rag_chain, documents, llm):
         # Initialize RAGAS evaluation LLM
         evaluation_llm = HuggingFaceEvaluationLLM(
             model="mistralai/Mistral-7B-Instruct-v0.2",
-            temperature=0.1
+            temperature=0.1,
+            huggingfacehub_api_token=os.environ.get('HUGGINGFACE_API_TOKEN') or os.environ.get('HF_API_TOKEN')
         )
         
         # Run RAGAS evaluation
@@ -351,6 +362,14 @@ def save_evaluation_results(results, eval_data):
 
 def main():
     st.title("🔍 RAG Evaluation System with RAGAS & LangChain")
+    
+    # Setup API access first
+    token_available = setup_api_access()
+    if not token_available:
+        st.error("Hugging Face API token not configured. Please set up your token first.")
+        st.info("Run token_setup.py to configure your Hugging Face API token.")
+        st.stop()
+    
     st.markdown("""
     This application allows you to evaluate a Retrieval-Augmented Generation (RAG) system using:
     * **Mistral 7B** as the LLM
