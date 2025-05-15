@@ -1,0 +1,12 @@
+streamlit
+langchain
+langchain_community
+langchain_core 
+ragas
+faiss-cpu 
+sentence-transformers
+torch 
+transformers 
+plotly 
+pandas 
+matplotlib
