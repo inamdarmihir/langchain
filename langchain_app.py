@@ -182,9 +182,7 @@ def prepare_eval_data(questions: List[str], rag_chain, ground_truths: List[List[
             contexts.append([doc.page_content for doc in retrieved_docs])
             
         except Exception as e:
-            st.warning(f"Error processing question 
-`{question}`
- for RAGAS: {e}")
+            st.warning(f"Error processing question \n`{question}`\n for RAGAS: {e}")
             answers.append("Error generating answer.")
             contexts.append([]) # Empty context if error
 
