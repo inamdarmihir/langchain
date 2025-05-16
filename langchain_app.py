@@ -30,7 +30,8 @@ from ragas.metrics import (
     context_precision,
 )
 from ragas.metrics.critique import harmfulness
-from ragas.llm import HuggingFaceEvaluationLLM
+from ragas.llms import LangchainLLM  # Changed from HuggingFaceEvaluationLLM to LangchainLLM
+from ragas.embeddings import LangchainEmbeddings  # Added for proper RAGAS embeddings
 from ragas import evaluate
 
 # Set page configuration
@@ -58,13 +59,12 @@ def initialize_llm():
         # Ensure HF token is available
         token = os.environ.get("HUGGINGFACE_API_TOKEN") or os.environ.get("HF_API_TOKEN")
         if not token:
-            st.error("Hugging Face API token not found. Please set up your token first.")
-            st.stop()
+            token = st.secrets.get("HUGGINGFACE_API_TOKEN", None)
+            if not token:
+                st.error("Hugging Face API token not found. Please set up your token first.")
+                st.stop()
 
         # Initialize HuggingFaceEndpoint for Mistral-7B or other suitable model
-        # Ensure the endpoint_url points to a valid Hugging Face Inference API endpoint for your chosen model
-        # For example, for Mistral-7B-Instruct-v0.1: "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
-        # You might need to adjust parameters like max_new_tokens based on the model and your needs.
         llm = HuggingFaceEndpoint(
             endpoint_url=st.secrets.get("HF_INFERENCE_ENDPOINT", "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"),
             huggingfacehub_api_token=token,
@@ -72,13 +72,14 @@ def initialize_llm():
             model_kwargs={
                 "max_new_tokens": 512,
                 "top_k": 50,
-                "temperature": 0.1, # Low temperature for more factual RAG
+                "temperature": 0.1,  # Low temperature for more factual RAG
                 "repetition_penalty": 1.03,
             }
         )
         st.session_state.llm = llm
-        # Also set up the RAGAS LLM wrapper
-        st.session_state.ragas_llm = HuggingFaceEvaluationLLM(llm=llm)
+        
+        # Set up the RAGAS LLM wrapper using LangchainLLM instead of HuggingFaceEvaluationLLM
+        st.session_state.ragas_llm = LangchainLLM(llm=llm)
         return llm
     except Exception as e:
         st.error(f"Error initializing LLM: {e}")
@@ -91,9 +92,11 @@ def initialize_embeddings():
         model_name = "sentence-transformers/all-MiniLM-L6-v2"
         embeddings = HuggingFaceEmbeddings(
             model_name=model_name,
-            model_kwargs={"device": "cpu"} # Explicitly use CPU for wider compatibility
+            model_kwargs={"device": "cpu"}  # Explicitly use CPU for wider compatibility
         )
         st.session_state.embeddings = embeddings
+        # Create RAGAS compatible embeddings wrapper
+        st.session_state.ragas_embeddings = LangchainEmbeddings(embeddings)
         return embeddings
     except Exception as e:
         st.error(f"Error initializing embeddings: {e}")
@@ -116,13 +119,14 @@ def load_and_process_document(uploaded_file):
                 loader = CSVLoader(tmp_file_path)
             else:
                 st.error("Unsupported file type. Please upload PDF, TXT, or CSV.")
+                os.remove(tmp_file_path)  # Clean up temp file
                 return None, None
             
             documents = loader.load()
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
             texts = text_splitter.split_documents(documents)
             
-            os.remove(tmp_file_path) # Clean up temp file
+            os.remove(tmp_file_path)  # Clean up temp file
             return documents, texts
         except Exception as e:
             st.error(f"Error loading or processing document: {e}")
@@ -143,48 +147,60 @@ def create_vector_store(texts, embeddings):
 # Build RAG chain
 def build_rag_chain(vectorstore, llm):
     if vectorstore and llm:
-        retriever = vectorstore.as_retriever()
-        
-        def format_docs(docs):
-            return "\n\n".join(doc.page_content for doc in docs)
+        try:
+            retriever = vectorstore.as_retriever()
+            
+            def format_docs(docs):
+                return "\n\n".join(doc.page_content for doc in docs)
 
-        rag_chain = (
-            {"context": retriever | format_docs, "question": RunnablePassthrough()}
-            | llm 
-            | StrOutputParser()
-        )
-        return rag_chain
+            # Format the prompt template for the LLM
+            def format_prompt(input_dict):
+                question = input_dict["question"]
+                context = input_dict["context"]
+                return f"""Answer the following question based only on the provided context:
+
+Question: {question}
+
+Context: {context}
+
+Answer:"""
+
+            rag_chain = (
+                {"context": retriever | format_docs, "question": RunnablePassthrough()}
+                | format_prompt  # Added to format the prompt correctly for the LLM
+                | llm 
+                | StrOutputParser()
+            )
+            return rag_chain
+        except Exception as e:
+            st.error(f"Error building RAG chain: {e}")
+            return None
     return None
 
 # Prepare data for RAGAS evaluation
-def prepare_eval_data(questions: List[str], rag_chain, ground_truths: List[List[str]]):
+def prepare_eval_data(questions: List[str], rag_chain, ground_truths: List[List[str]], vectorstore):
     answers = []
     contexts = []
-    if not rag_chain:
-        st.error("RAG chain not initialized. Cannot prepare evaluation data.")
+    if not rag_chain or not vectorstore:
+        st.error("RAG chain or vector store not initialized. Cannot prepare evaluation data.")
         return None
 
     for question in questions:
         try:
-            # Assuming the RAG chain directly gives the answer
-            # To get contexts, we need to access the retriever part separately or modify the chain output
-            # For simplicity, let's assume the chain is modified or we can tap into the retriever
-            # This part might need adjustment based on how `build_rag_chain` is structured for context retrieval
+            # Retrieve contexts first for transparency
+            retriever = vectorstore.as_retriever()
+            retrieved_docs = retriever.get_relevant_documents(question)
+            context_texts = [doc.page_content for doc in retrieved_docs]
+            contexts.append(context_texts)
             
-            # Invoke the chain for the answer
+            # Invoke the chain for the answer using the retrieved contexts
             response = rag_chain.invoke(question)
             answers.append(response)
-            
-            # Retrieve contexts separately for RAGAS
-            # This is a common pattern: get contexts that led to the answer
-            retriever = st.session_state.vectorstore.as_retriever()
-            retrieved_docs = retriever.get_relevant_documents(question)
-            contexts.append([doc.page_content for doc in retrieved_docs])
             
         except Exception as e:
             st.warning(f"Error processing question \n`{question}`\n for RAGAS: {e}")
             answers.append("Error generating answer.")
-            contexts.append([]) # Empty context if error
+            contexts.append([])  # Empty context if error
 
     if len(questions) != len(ground_truths):
         st.error("Number of questions and ground truths must match for RAGAS evaluation.")
@@ -194,13 +210,13 @@ def prepare_eval_data(questions: List[str], rag_chain, ground_truths: List[List[
         "question": questions,
         "answer": answers,
         "contexts": contexts,
-        "ground_truth": ground_truths # RAGAS expects this column name
+        "ground_truth": ground_truths  # RAGAS expects this column name
     }
     return data
 
 # Run RAGAS evaluation
-def run_ragas_evaluation(eval_data, ragas_llm, embeddings):
-    if eval_data and ragas_llm and embeddings:
+def run_ragas_evaluation(eval_data, ragas_llm, ragas_embeddings):
+    if eval_data and ragas_llm and ragas_embeddings:
         from datasets import Dataset
         dataset = Dataset.from_dict(eval_data)
         
@@ -209,19 +225,21 @@ def run_ragas_evaluation(eval_data, ragas_llm, embeddings):
             answer_relevancy,
             context_precision,
             context_recall,
-            # harmfulness # Uncomment if critique is needed and configured
+            # harmfulness  # Uncomment if critique is needed and configured
         ]
         
         try:
             result = evaluate(
                 dataset=dataset,
                 metrics=metrics,
-                llm=ragas_llm, # Using the HuggingFaceEvaluationLLM wrapper
-                embeddings=embeddings # Using LangchainEmbeddingsWrapper for HF embeddings
+                llm=ragas_llm,  # Using LangchainLLM wrapper
+                embeddings=ragas_embeddings  # Using LangchainEmbeddings wrapper
             )
             return result
         except Exception as e:
             st.error(f"Error during RAGAS evaluation: {e}")
+            import traceback
+            st.error(traceback.format_exc())
             return None
     return None
 
@@ -229,7 +247,7 @@ def run_ragas_evaluation(eval_data, ragas_llm, embeddings):
 st.title("🧪 RAG Evaluation System with RAGAS & LangChain")
 st.markdown("""
 Welcome! This application allows you to upload a document, ask questions against it using a RAG (Retrieval Augmented Generation) 
-            pipeline powered by open-source models (Mistral & Sentence Transformers), and then evaluate the RAG system using RAGAS.
+pipeline powered by open-source models (Mistral & Sentence Transformers), and then evaluate the RAG system using RAGAS.
 """)
 
 # Initialize API access (checks for secrets)
@@ -243,7 +261,8 @@ if "embeddings" not in st.session_state:
 
 llm = st.session_state.llm
 embeddings = st.session_state.embeddings
-ragas_llm = st.session_state.get("ragas_llm") # Should be set during initialize_llm
+ragas_llm = st.session_state.get("ragas_llm")  # Should be set during initialize_llm
+ragas_embeddings = st.session_state.get("ragas_embeddings")  # Should be set during initialize_embeddings
 
 # --- Sidebar for Configuration ---
 st.sidebar.header("⚙️ Configuration")
@@ -267,9 +286,7 @@ if uploaded_file:
                 st.session_state.vectorstore = None
                 st.session_state.uploaded_file_name = None
 elif st.session_state.get("uploaded_file_name"):
-    st.sidebar.info(f"Using previously uploaded document: 
-`{st.session_state.uploaded_file_name}`
-")
+    st.sidebar.info(f"Using previously uploaded document: `{st.session_state.uploaded_file_name}`")
 
 # --- Main Area for Interaction and Evaluation ---
 if st.session_state.vectorstore and llm:
@@ -317,23 +334,28 @@ if st.session_state.vectorstore and llm:
         
         if q and gt:
             eval_questions_list.append(q)
-            eval_ground_truths_list.append([gt]) # RAGAS expects list of strings for ground_truth
+            eval_ground_truths_list.append([gt])  # RAGAS expects list of strings for ground_truth
 
     if st.button("🚀 Run RAGAS Evaluation", disabled=not (eval_questions_list and len(eval_questions_list) == num_eval_questions)):
         if not ragas_llm:
             st.error("RAGAS LLM not initialized. Cannot run evaluation.")
-        elif not embeddings:
-            st.error("Embeddings not initialized. Cannot run evaluation.")
+        elif not ragas_embeddings:
+            st.error("RAGAS embeddings not initialized. Cannot run evaluation.")
         else:
             with st.spinner("Preparing evaluation data and running RAGAS..."):
                 # Use the RAG chain to get answers and contexts for the eval questions
-                st.session_state.eval_data = prepare_eval_data(eval_questions_list, rag_chain, eval_ground_truths_list)
+                st.session_state.eval_data = prepare_eval_data(
+                    eval_questions_list, 
+                    rag_chain, 
+                    eval_ground_truths_list,
+                    st.session_state.vectorstore  # Pass vectorstore directly
+                )
                 
                 if st.session_state.eval_data:
                     st.session_state.evaluation_results = run_ragas_evaluation(
                         st.session_state.eval_data, 
                         ragas_llm, 
-                        st.session_state.embeddings
+                        ragas_embeddings  # Use the RAGAS-specific embeddings wrapper
                     )
                     if st.session_state.evaluation_results:
                         st.success("RAGAS Evaluation Completed!")
@@ -363,8 +385,8 @@ if st.session_state.vectorstore and llm:
         # Display detailed results per question if needed
         st.markdown("#### Detailed Results per Question")
         for i, row in results_df.iterrows():
-            with st.expander(f"Question: {row["question"]}"):
-                st.write(f"**Answer:** {row["answer"]}")
+            with st.expander(f"Question: {row['question']}"):
+                st.write(f"**Answer:** {row['answer']}")
                 st.write(f"**Contexts Provided:**")
                 for idx, ctx in enumerate(row["contexts"]):
                     st.text_area(f"Context {idx+1}", ctx, height=100, disabled=True, key=f"ctx_detail_{i}_{idx}")
@@ -383,4 +405,3 @@ else:
 
 st.sidebar.markdown("---    ")
 st.sidebar.markdown("**About:** This app demonstrates RAG evaluation using LangChain and RAGAS with open-source models.")
-
