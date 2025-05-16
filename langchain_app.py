@@ -260,9 +260,7 @@ if uploaded_file:
                 st.session_state.documents = docs
                 st.session_state.vectorstore = create_vector_store(texts, embeddings)
                 st.session_state.uploaded_file_name = uploaded_file.name
-                st.sidebar.success(f"Document 
-`{uploaded_file.name}`
- processed and vector store created!")
+                st.sidebar.success(f"Document `{uploaded_file.name}` processed and vector store created!")
             else:
                 st.sidebar.error("Failed to process document.")
                 st.session_state.documents = None
